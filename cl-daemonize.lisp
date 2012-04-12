@@ -35,9 +35,11 @@ ourselves."
         (args (cdr sb-ext:*posix-argv*)))
     (format t "*** RESTARTING ~A~%" executable)
     (labels ((restart ()
-               (dolist (port swank::*listener-sockets*)
-                 (ignore-errors
-                   (swank:stop-server port)))
+               (dolist (i swank::*servers*)
+                 (destructuring-bind (server port thread) i
+                   (declare (ignore server thread))
+                   (ignore-errors
+                     (swank:stop-server port))))
                (dolist (thread (remove sb-thread:*current-thread* (sb-thread:list-all-threads)))
                  (ignore-errors
                    (sb-thread:terminate-thread thread)
