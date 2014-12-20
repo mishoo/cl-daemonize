@@ -4,9 +4,6 @@
 
 #-sbcl (error "This is SBCL specific")
 
-(export '(daemonize
-          restart-process))
-
 (defparameter *the-output* "/dev/null")
 (defparameter *the-error* "/dev/null")
 
@@ -23,9 +20,23 @@
                                                      :initial-contents `(,program ,@args)
                                                      :null-terminated-p t)
                         :pointer (cffi:foreign-alloc :string
-                                                     :initial-contents (posix-environ)
+                                                     :initial-contents (sb-ext:posix-environ)
                                                      :null-terminated-p t)
                         :int))
+
+(defun maybe-value (symbol package-desig)
+  (multiple-value-bind (symbol% found)
+      (find-symbol (symbol-name symbol)
+                   (find-package package-desig))
+    (if found (values (symbol-value symbol%) t)
+        (values nil nil))))
+
+(defun maybe-call (symbol package-desig &rest args)
+  (multiple-value-bind (symbol% found)
+      (find-symbol (symbol-name symbol)
+                   (find-package package-desig))
+    (if found (values (apply (symbol-function symbol%) args) t)
+        (values nil nil))))
 
 (defun restart-process ()
   "Restarts the currently running program, passing the same command
@@ -35,18 +46,18 @@ ourselves."
         (args (cdr sb-ext:*posix-argv*)))
     (format t "*** RESTARTING ~A~%" executable)
     (labels ((restart ()
-               (dolist (i swank::*servers*)
+               (dolist (i (maybe-value :*servers* :swank))
                  (destructuring-bind (server port thread) i
                    (declare (ignore server thread))
                    (ignore-errors
-                     (swank:stop-server port))))
+                     (maybe-call :stop-server :swank port))))
                (dolist (thread (remove sb-thread:*current-thread* (sb-thread:list-all-threads)))
                  (ignore-errors
                    (sb-thread:terminate-thread thread)
                    (sb-thread:join-thread thread)))
                (close-all-files)
                (exec (namestring executable) args)))
-      (push #'restart *exit-hooks*))
+      (push #'restart sb-ext:*exit-hooks*))
     ;; we're expected to have a TERM handler that does any necessary
     ;; cleanups and exits with (sb-ext:quit).  This in turn will call
     ;; the exit hook that we pushed above.
@@ -57,8 +68,8 @@ ourselves."
 ;;; https://github.com/archimag/restas/blob/master/contrib/restas-daemon.lisp
 ;;; released under the GNU LGPL.
 
-(unless (boundp 'sb-unix:tiocnotty)
-  (defconstant sb-unix:tiocnotty 21538))
+;; FIXME: It would be better idea to use cffi-grovel
+(defconstant tiocnotty 21538)
 
 ;;;; required path for sbcl :(
 (sb-posix::define-call "grantpt" int minusp (fd sb-posix::file-descriptor))
@@ -74,7 +85,7 @@ ourselves."
     (print err *error-output*)
     ;; (format out "~A" (trivial-backtrace:print-backtrace condition :output *error-output*))
     (sb-posix:syslog sb-posix:log-err err))
-  (quit :unix-status 1))
+  (sb-ext:exit :code 1))
 
 (defun switch-to-slave-pseudo-terminal (&optional (out *the-output*) (err *the-error*))
   (flet ((c-bit-or (&rest args)
@@ -111,18 +122,19 @@ the file when the process is stopped."
   (setf *debugger-hook* #'global-error-handler)
   (sb-posix:chdir #P"/")
   (sb-posix:umask 0)
+  #-bsd
   (let ((fd (ignore-errors (sb-posix:open #P"/dev/tty" sb-posix:O-RDWR))))
     (when fd
-      (sb-posix:ioctl fd sb-unix::tiocnotty)
+      (sb-posix:ioctl fd tiocnotty)
       (sb-posix:close fd)))
   (switch-to-slave-pseudo-terminal out err)
   (unless (= (sb-posix:fork) 0)
-    (sb-ext:quit :unix-status 0))
+    (sb-ext:exit :code 0))
   (sb-posix:setsid)
   (flet ((stop (&rest args)
            (if stop
                (apply stop args)
-               (sb-ext:quit))))
+               (sb-ext:exit))))
     (sb-sys:enable-interrupt sb-posix:sigterm #'stop)
     (sb-sys:enable-interrupt sb-posix:sigint #'stop))
   (sb-sys:enable-interrupt sb-posix:sigusr1 (lambda (&rest args)
@@ -137,4 +149,4 @@ the file when the process is stopped."
     (push (lambda ()
             (ignore-errors
               (delete-file pid)))
-          *exit-hooks*)))
+          sb-ext:*exit-hooks*)))
